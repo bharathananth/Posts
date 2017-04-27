@@ -1,0 +1,125 @@
+---
+title: "Combining p-values from multiple tests on the same data"
+author: "Bharath Ananthasubramaniam"
+date: "24/04/2017"
+output: md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MetaDE)
+library(ggplot2)
+library(magrittr)
+```
+
+It is common to encounter situations, where one has 
+
+* data from the same assay from different labs or sources, or
+* data from different assays all targeting a phenomenon.
+
+One then proceeds to test a desired hypothesis on the basis of these multiple datasets. The only challenge in doing this is the manner in which the different datasets can be *combined* in a statistically appropriate way. Since in the biological context, it is rather difficult to quantify the quality of different datasets. It is common practice to perform the hypothesis test on the different data individually and then combine the resulting p-values and occasionally the test statistics. The approaches are broadly termed **meta-analysis**.
+
+```{r data, echo=FALSE}
+No_of_features <- 2000
+data_1 <- matrix(rnorm(10*No_of_features, mean = 5), nrow = No_of_features)
+data_2 <- matrix(rnorm(10*No_of_features, mean = 5), nrow = No_of_features)
+rownames(data_1) <- paste0("f", seq(No_of_features))
+rownames(data_2) <- paste0("f", seq(No_of_features))
+```
+
+These approaches do not however cover the situation where two different approaches are used to test the same hypothesis on a single dataset. One might hope to improve power by using different (complementary?) approaches. Suppose we have measurements of `r No_of_features` features across two different conditions. For simplicity, we assume the measurements are normally distributed under both conditions and we have 5 replicates for each feature-condition combination.
+
+The *t-test* is the appropriate test for the difference between two means. Since we have but 5 replicates for each conditions in general, we might opt for a non-parametric *Wilcoxson rank-sum test* that does not assume normality of the data. In order to be 'sure', we run both these tests and then combine the p-values using the package [MetaDE](https://cran.r-project.org/web/packages/MetaDE/index.html) that implements five different meta-analysis procedures for combining p-values.
+
+```{r testing, echo=FALSE}
+p.value_ttest <- sapply(seq(No_of_features), function(i) t.test(data_1[i,], data_2[i,], alternative = "two.sided")$p.value)
+p.value_wtest <- sapply(seq(No_of_features), function(i) wilcox.test(data_1[i,], data_2[i,], alternative = "two.sided", paired = FALSE, exact = TRUE)$p.value)
+meta_analysis_maxP <- MetaDE.pvalue(list(p=cbind(p.value_ttest, p.value_wtest), bp=NULL), meta.method = "maxP")
+meta_analysis_minP <- MetaDE.pvalue(list(p=cbind(p.value_ttest, p.value_wtest), bp=NULL), meta.method = "minP")
+meta_analysis_fisher <- MetaDE.pvalue(list(p=cbind(p.value_ttest, p.value_wtest), bp=NULL), meta.method = "Fisher")
+meta_analysis_stouffer <- MetaDE.pvalue(list(p=cbind(p.value_ttest, p.value_wtest), bp=NULL), meta.method = "Stouffer")
+```
+
+A simple approach to test the validity of such meta analysis approaches to this situation is to look at the distribution of the p-values under the null hypothesis -- p-values under the null hypothesis are uniformly distributed in [0,1] if test-statistic takes continuous values. Hence, performing this meta-analyses should indeed leave the p-values *uniformly distributed* if the data are generated under the null hypothesis.
+
+```{r plot, echo=FALSE, fig.align="center", fig.height=2, fig.width=6, fig.cap="**Figure 1:** P-value distribution of the null-distribution data under both tests and the correlation between the p-values from the two methods."}
+df <- data.frame("t.test" = p.value_ttest, Wilcoxson = p.value_wtest)
+f1 <- ggplot(tidyr::gather(df, type, pv)) + 
+      geom_histogram(aes(x=pv, fill=type, y=..density..), binwidth = 0.05, center=0.025) + theme_bw(base_size = 8) +
+      facet_wrap(~ type, nrow = 1) + xlab("P-value") + ylab("Density") +
+      theme(strip.background = element_rect(fill="white"), legend.position = "none")
+f2 <- ggplot(df, aes(x=-log10(`t.test`),y=-log10(Wilcoxson))) + geom_point(size=0.5) + theme_bw(base_size = 8) + 
+      xlab("log10(T-test p-value)") + ylab("log10(Wilcoxson p-value)") + geom_smooth(method="lm", formula = y~x)
+gridExtra::grid.arrange(f1,f2, layout_matrix=matrix(c(1,1,2), nrow = 1))
+```
+
+Since we generated all our data under the null-distribution, we notice that p-values are uniform under the t-test but not the Wilcoxson; the latter is a discrete distribution with discrete-valued test statistic (the rank-sum). Not surprisingly, since we applied both methods to the same data, we obtain highly correlated p-values from both tests (*pearson correlation*=`r cor.test(p.value_ttest, p.value_wtest)$estimate`).
+
+```{r compare, echo=FALSE, fig.align="center", fig.height=4, fig.cap="**Figure 2:** P-values distribution of the combined meta-analysis p-values."}
+df <- data.frame("Fisher"=meta_analysis_fisher$meta.analysis$pval,
+                 "Stouffer"=meta_analysis_stouffer$meta.analysis$pval,
+                 "Max_P"=meta_analysis_maxP$meta.analysis$pval,
+                 "Min_P"=meta_analysis_minP$meta.analysis$pval)
+ggplot(tidyr::gather(df,type,pv)) + 
+     geom_histogram(aes(x=pv, y=..density..), binwidth = 0.05, center=0.025) + facet_wrap(~type, ncol=2) +
+     theme_bw(base_size = 10) + xlab("Combined P-value") + ylab("Density") + theme(strip.background = element_rect(fill = "white"))
+```
+Interestingly, it is clear that none of the methods produce a distribution that is uniform. The *Fisher* and *min-P* methods produce conservative estimates of the p-values (p-values under the null-hypothesis are shifted towards 1), while the *Stouffer* and *maxP* produce anti-conservative (optimistic) p-value estimates.
+
+Another perspective on the same data can be obtained by looking at if do control Type I errors at the level we want to. If we control at a level $\alpha$, then expect that $$P(p<\alpha)=\alpha,~\textrm{ under }H_0.$$
+```{r table, echo=FALSE,results='asis'}
+df2 <- tidyr::gather(df, type, pv) %>% 
+  dplyr::group_by(type) %>% 
+  dplyr::summarise(co1 = mean(pv<0.01), co2=mean(pv<0.05), co3=mean(pv<0.1)) %>%
+  set_colnames(c("Method", "\u03b1<0.01","\u03b1<0.05","\u03b1<0.1"))
+
+knitr::kable(df2,digits = 2, format = "markdown", caption = "**Table:** Control of Type I errors")
+```
+It is clear from the above table that the conservative methods control Type I errors (false positives) more strigently than the the anti-conservative methods over a variety of levels.
+
+## Effect of p-value correlations
+```{r correlated_U, echo=FALSE, fig.height=5, fig.align="center", fig.cap="Cumulative distributions of the combined correlated p-values using different meta-analysis methods."}
+## Initialization and parameters 
+set.seed(467)
+n <- 5000                            # Number of samples
+
+## Functions
+gen.gauss.cop <- function(r, n){
+    rho <- 2 * sin(r * pi/6)        # Pearson correlation
+    P <- toeplitz(c(1, rho))        # Correlation matrix
+    d <- nrow(P)                    # Dimension
+    ## Generate sample
+    U <- pnorm(matrix(rnorm(n*d), ncol = d) %*% chol(P))
+    return(U)
+}
+
+p1 <- gen.gauss.cop(0.01, n)
+p2 <- gen.gauss.cop(0.25, n)
+p3 <- gen.gauss.cop(0.5, n)
+p4 <- gen.gauss.cop(0.75, n)
+
+rhos <- c(0.01,0.25,0.5,0.75)
+methods <- c("Fisher","maxP","minP","Stouffer")
+f <- list()
+for (i in seq_along(methods)){
+  p1_meta <- MetaDE.pvalue(list(p=p1,bp=NULL),meta.method = methods[i])
+  p2_meta <- MetaDE.pvalue(list(p=p2,bp=NULL),meta.method = methods[i])
+  p3_meta <- MetaDE.pvalue(list(p=p3,bp=NULL),meta.method = methods[i])
+  p4_meta <- MetaDE.pvalue(list(p=p4,bp=NULL),meta.method = methods[i])
+  df <- data.frame(p1_meta$meta.analysis$pval,
+                   p2_meta$meta.analysis$pval,
+                   p3_meta$meta.analysis$pval,
+                   p4_meta$meta.analysis$pval) %>% 
+    set_colnames(paste0("rho",seq(4))) %>%
+    tidyr::gather(type,pv)
+  f[[i]] <- ggplot(df) + geom_abline(slope = 1, linetype=2) + stat_ecdf(aes(x=pv, color=type)) + theme_bw() +
+            xlab("Theoretical Type I control") + ylab("Actual Type I control") + ggtitle(methods[i]) +
+            theme(legend.position = c(0.15,0.7), plot.title = element_text(hjust = 0.5,size = 10), legend.title = element_blank(),
+                  legend.background = element_blank()) + 
+            scale_color_discrete(labels=rhos) 
+}
+gridExtra::grid.arrange(grobs=f, nrow=2,ncol = 2)
+```
+We generated approximately uniform p-values from two hypothetical tests. We allowed correlations between the p-values to simulate the effect of tests performed on the same data as in the previous section. If the p-value combining worked correctly, we would expect the theoretical and actual Type I control is match (along $y=x$).
+
+We see our conclusions on the four methods bear out. *minP* is anti-conservative and *Stouffer* and *maxP* are conservative. *Fisher* anti-conservative for low (practically useful) thresholds but anti-conservative at larger thresholds. The skew away from the uniform distribution for the combined p-values increases with increasing correlation. Overall, *Fisher* appears to be the best (of the worse) choices.
