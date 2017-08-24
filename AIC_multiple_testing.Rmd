@@ -1,0 +1,71 @@
+---
+title: "Should p-values after model selection be multiple testing corrected?"
+author: "Bharath Ananthasubramaniam"
+date: "18/08/2017"
+output: md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(ggplot2)
+```
+
+I was recently comparing different likely models (each was a different time profile) for each gene in time-series RNA-seq data. Since I did not have simple nested models, I was forced to use (as the simplest option) the [*Akaike Information Criterion* (AIC)](https://en.wikipedia.org/wiki/Akaike_information_criterion) (I could have used the *Bayesian Information Criterion* as well) to select the "best" model. In the analysis of genomic data, the next step is typically thresholding the corrected p-values (i.e., after correcting for multiple testing) to identify genes with *statiscally significant* fits to the model(s).
+
+Of course, AIC does not provide an overall quality of fit for a gene, such as p-value, but rather AIC computes only a relative measure of the quality of fit of the models for a single gene. Since I was comparing simple linear models, I could obtain p-values for each model fit using the standard F-test. The question then arises, since model selection involves multiple fits (i.e., tests), *should the p-value (from the best model) for the individual gene already be multiple-testing corrected ?*
+
+We are now going to use my standard trick to test if multiple testing is needed. It goes as follows: If the approach is applied to random data under the null distribution $H_0$, then final p-values produced by the approach must continue to be uniformly distributed. If the distribution is either conservative or anti-conservative, then the approach is not statistically sound/consistent.
+
+```{r data}
+n <- 10000    # The number of genes in genome
+T <- 10       # The number of time points per gene
+data <- matrix(rnorm(n*T), nrow = n, ncol = T)
+data <- data/runif(n, min = 1/4, max = 4) + runif(n, min = 20, max = 500)
+```
+
+We generate a random dataset of `r n` genes each measured at `r T` different points (one time unit part). We then apply three different time profiles for each gene: a linear trend, a quadratic profile or a sinusoidal profile of period ten time units.
+
+```{r model, fig.width=5, fig.height=3, fig.align="center", fig.cap="Distribution of the p-value of the best model without multiple testing correction."}
+t <- seq(T)
+# Linear regression of the gene profiles
+model_1 <- lm(t(data) ~ t)
+model_2 <- lm(t(data) ~ t + t^2)
+model_3 <- lm(t(data) ~ sin(2*pi*t/T) + cos(2*pi*t/T))
+
+# Calculating the AIC for each model for each gene
+AIC_model_1 <- sapply(seq(n), function(i) AIC(lm(data[i,]~t))) # Refit the model as AIC does not work with mlm class objects
+AIC_model_2 <- sapply(seq(n), function(i) AIC(lm(data[i,]~t + t^2)))
+AIC_model_3 <- sapply(seq(n), function(i) AIC(lm(data[i,]~sin(2*pi*t/T) + cos(2*pi*t/T))))
+
+best_model_index <- apply(cbind(AIC_model_1, AIC_model_2, AIC_model_3), 1, which.min)
+
+# Calculating the p-values for the different linear fits using F-test
+pvalue_model_1 <- sapply(summary(model_1), function(x) 1-pf(x$fstatistic[1],x$fstatistic[2],x$fstatistic[3]))
+pvalue_model_2 <- sapply(summary(model_2), function(x) 1-pf(x$fstatistic[1],x$fstatistic[2],x$fstatistic[3]))
+pvalue_model_3 <- sapply(summary(model_3), function(x) 1-pf(x$fstatistic[1],x$fstatistic[2],x$fstatistic[3]))
+
+best_model_pvalue <- cbind(pvalue_model_1, pvalue_model_2, pvalue_model_3)[cbind(seq(n), best_model_index)]
+
+ggplot(data.frame(pv= best_model_pvalue), aes(x=pv)) + 
+      geom_histogram(aes(y=..density..), binwidth = 0.025, boundary=0, fill="white", color="black") + theme_bw(base_size = 10) +
+      xlab("P-value") + ylab("Density") +
+      theme(strip.background = element_rect(fill="white"), legend.position = "none")
+```
+
+As we see above, the p-value distribution is non-uniform and anti-conservative. In other words, the p-values will produce more false positives than expected under $H_0$.
+
+```{r corrected pvalues, fig.align="center", fig.width=5, fig.height=3, fig.cap="Distribution of the p-value of the best model with multiple testing correction."}
+corrected_pvalues <- t(apply(cbind(pvalue_model_1, pvalue_model_2, pvalue_model_3), 1, p.adjust, method="fdr"))[cbind(seq(n), best_model_index)]
+
+ggplot(data.frame(pv= corrected_pvalues), aes(x=pv)) + 
+      geom_histogram(aes(y=..density..), binwidth = 0.025, boundary=0, fill="white", color="black") + theme_bw(base_size = 10) +
+      xlab("P-value") + ylab("Density") +
+      theme(strip.background = element_rect(fill="white"), legend.position = "none")
+```
+
+So, we inspect the p-values after multiple-testing correction for each gene using Benjamini-Hochberg. Clearly, the p-value distribution is indeed almost uniform as it should be under $H_0$, although the distribution is a bit conservative (p-values biased away from small values). This suggests that the actual FDR using this model selection and correction approach will be smaller than suggested by theory, which is still okay.
+
+{{% alert note %}}
+If the p-value based quality of fit is desired after model selection, the p-value has to be multiple testing corrected according to how many models are being compared.
+{{% /alert %}}
+
